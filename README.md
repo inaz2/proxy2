@@ -23,7 +23,15 @@ Just run as a script:
 $ python proxy2.py
 ```
 
-Above command runs the proxy on tcp/8080.
+Above command runs the proxy on localhost:8080.
+Verify it works by typing the below command on another terminal of the same host.
+
+```
+$ http_proxy=localhost:8080 curl http://www.example.com/
+```
+
+proxy2 is made for debugging/testing, so it only accepts connections from localhost.
+
 To use another port, specify the port number as the first argument.
 
 ```
