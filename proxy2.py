@@ -161,7 +161,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             setattr(res, 'response_version', version_table[res.version])
 
             # support streaming
-            if not 'Content-Length' in res.headers and 'no-store' in res.headers.get('Cache-Control', ''):
+            if 'Content-Length' not in res.headers and 'no-store' not in res.headers.get('Cache-Control', ''):
                 self.response_handler(req, req_body, res, '')
                 setattr(res, 'headers', self.filter_headers(res.headers))
                 self.relay_streaming(res)
