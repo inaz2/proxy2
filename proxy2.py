@@ -288,7 +288,10 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def print_info(self, req, req_body, res, res_body):
         def parse_qsl(s):
-            return '\n'.join("{:<20} {}".format(k, v) for k, v in urlparse.parse_qsl(s, keep_blank_values=True))
+            if type(s) == bytes:
+                return '\n'.join("{:<20} {}".format(k, v) for k, v in urlparse.parse_qsl(s, keep_blank_values=True))
+            else:
+                return '\n'.join("{:<20} {}".format(k, v) for k, v in urlparse.parse_qsl(s.decode("utf-8"), keep_blank_values=True))
 
         req_header_text = "{} {} {}\n{}".format(req.command, req.path, req.request_version, req.headers)
         res_header_text = "{} {} {}\n{}".format(res.response_version, res.status, res.reason, res.headers)
