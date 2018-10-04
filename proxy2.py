@@ -12,6 +12,7 @@ import zlib
 import time
 import json
 import re
+from string import Template
 from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
 from SocketServer import ThreadingMixIn
 from cStringIO import StringIO
@@ -44,6 +45,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     cacert = join_with_script_dir('ca.crt')
     certkey = join_with_script_dir('cert.key')
     certdir = join_with_script_dir('certs/')
+    conf_template = Template("subjectAltName=DNS:${hostname}")
     timeout = 5
     lock = threading.Lock()
 
@@ -69,13 +71,17 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     def connect_intercept(self):
         hostname = self.path.split(':')[0]
         certpath = "%s/%s.crt" % (self.certdir.rstrip('/'), hostname)
+        confpath = "%s/%s.cnf" % (self.certdir.rstrip('/'), hostname)
 
         with self.lock:
             if not os.path.isfile(certpath):
+                with open(confpath, 'w') as fp:
+                    fp.write(self.conf_template.substitute(hostname=hostname))
                 epoch = "%d" % (time.time() * 1000)
                 p1 = Popen(["openssl", "req", "-new", "-key", self.certkey, "-subj", "/CN=%s" % hostname], stdout=PIPE)
-                p2 = Popen(["openssl", "x509", "-req", "-days", "3650", "-CA", self.cacert, "-CAkey", self.cakey, "-set_serial", epoch, "-out", certpath], stdin=p1.stdout, stderr=PIPE)
+                p2 = Popen(["openssl", "x509", "-req", "-extfile", confpath, "-days", "3650", "-CA", self.cacert, "-CAkey", self.cakey, "-set_serial", epoch, "-out", certpath], stdin=p1.stdout, stderr=PIPE)
                 p2.communicate()
+                os.unlink(confpath)
 
         self.wfile.write("%s %d %s\r\n" % (self.protocol_version, 200, 'Connection Established'))
         self.end_headers()
