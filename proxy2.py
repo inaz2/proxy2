@@ -45,7 +45,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     cacert = join_with_script_dir('ca.crt')
     certkey = join_with_script_dir('cert.key')
     certdir = join_with_script_dir('certs/')
-    conf_template = Template("subjectAltName=DNS:${hostname}")
+    conf_template = Template("subjectAltName=${category}:${hostname}")
     timeout = 5
     lock = threading.Lock()
 
@@ -70,13 +70,20 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def connect_intercept(self):
         hostname = self.path.split(':')[0]
+        ippat = re.compile("^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+        if ippat.match(hostname):
+            cert_category = "IP"
+        else:
+            cert_category = "DNS"
+
+
         certpath = "%s/%s.crt" % (self.certdir.rstrip('/'), hostname)
         confpath = "%s/%s.cnf" % (self.certdir.rstrip('/'), hostname)
 
         with self.lock:
             if not os.path.isfile(certpath):
                 with open(confpath, 'w') as fp:
-                    fp.write(self.conf_template.substitute(hostname=hostname))
+                    fp.write(self.conf_template.substitute(category = cert_category, hostname = hostname))
                 epoch = "%d" % (time.time() * 1000)
                 p1 = Popen(["openssl", "req", "-new", "-key", self.certkey, "-subj", "/CN=%s" % hostname], stdout=PIPE)
                 p2 = Popen(["openssl", "x509", "-req", "-extfile", confpath, "-days", "3650", "-CA", self.cacert, "-CAkey", self.cakey, "-set_serial", epoch, "-out", certpath], stdin=p1.stdout, stderr=PIPE)
