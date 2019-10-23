@@ -10,7 +10,9 @@ import zlib
 import time
 import json
 import re
-from subprocess import Popen, PIPE
+from ssl_wrapper import *
+from string import Template
+from OpenSSL import crypto
 
 try:
     import http.client as httplib
@@ -70,26 +72,44 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.log_message(format, *args)
 
     def do_CONNECT(self):
-        if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isfile(self.certkey) and os.path.isdir(self.certdir):
+        if ca_files_exist():
             self.connect_intercept()
         else:
             self.connect_relay()
 
     def connect_intercept(self):
         hostname = self.path.split(':')[0]
-        certpath = "{}/{}.crt".format(self.certdir.rstrip('/'), hostname)
+        ippat = re.compile("^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+        cert_category = "DNS"
+        if ippat.match(hostname):
+            cert_category = "IP"
+
+        certpath = "%s/%s.crt" % (cert_dir.rstrip('/'), hostname)
 
         with self.lock:
             if not os.path.isfile(certpath):
-                epoch = str(int(time.time() * 1000))
-                p1 = Popen(["openssl", "req", "-new", "-key", self.certkey, "-subj", "/CN={}".format(hostname)], stdout=PIPE)
-                p2 = Popen(["openssl", "x509", "-req", "-days", "3650", "-CA", self.cacert, "-CAkey", self.cakey, "-set_serial", epoch, "-out", certpath], stdin=p1.stdout, stderr=PIPE)
-                p2.communicate()
+                x509_serial = int("%d" % (time.time() * 1000))
+                valid_time_interval = (0, 60 * 60 * 24 * 365)
+                cert_request = create_cert_request(cert_key_obj, CN=hostname)
+                cert = create_certificate(
+                    cert_request, (ca_crt_obj, ca_key_obj), x509_serial,
+                    valid_time_interval,
+                    subject_alt_names=[
+                        Template("${category}:${hostname}").substitute(hostname=hostname, category=cert_category)
+                    ]
+                )
+                with open(certpath, 'wb+') as f:
+                    f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+
 
         self.wfile.write("{} {} {}\r\n".format(self.protocol_version, 200, 'Connection Established').encode('latin_1'))
         self.wfile.write(b'\r\n')
 
-        self.connection = ssl.wrap_socket(self.connection, keyfile=self.certkey, certfile=certpath, server_side=True)
+        self.connection = ssl.wrap_socket(self.connection,
+                                          keyfile=cert_key,
+                                          certfile=certpath,
+                                          server_side=True)
+
         self.rfile = self.connection.makefile("rb", self.rbufsize)
         self.wfile = self.connection.makefile("wb", self.wbufsize)
 
@@ -271,6 +291,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 text = zlib.decompress(data)
             except zlib.error:
                 text = zlib.decompress(data, -zlib.MAX_WBITS)
+        elif encoding == 'br': #Brotli
+            return data
         else:
             raise Exception("Unknown Content-Encoding: {}".format(encoding))
         return text
