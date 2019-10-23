@@ -41,11 +41,9 @@ $ python proxy2.py 3128
 
 ## Enable HTTPS intercept
 
-To intercept HTTPS connections, generate private keys and a private CA certificate:
-
-```
-$ ./setup_https_intercept.sh
-```
+This proxy intercepts HTTPS connections automatically. It generates private keys and a private CA certificate during 
+the first run or if it doesn't exist as ca.crt, cert.key and ca.key at ssl-data folder. You may change it names at ssl_wrapper.py
+file.
 
 Through the proxy, you can access http://proxy2.test/ and install the CA certificate in the browsers.
 
