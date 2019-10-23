@@ -75,6 +75,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if ca_files_exist():
             self.connect_intercept()
         else:
+            print("can't encode ssl traffic, just relay it")
             self.connect_relay()
 
     def connect_intercept(self):
@@ -206,7 +207,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             return
 
         content_encoding = res.headers.get('Content-Encoding', 'identity')
-        res_body_plain = self.decode_content_body(res_body, content_encoding)
+        res_body_plain = self.decode_content_body(res_body.encode('latin_1'), content_encoding)
 
         res_body_modified = self.response_handler(req, req_body, res, res_body_plain)
         if res_body_modified is False:
