@@ -145,7 +145,7 @@ if not ca_files_exist():
             mkdir(cert_dir)
 
     except StandardError as e:
-        logger.exception(e)
+        print(e)
 
 
 def _load_crypto_obj(path, crypto_method):
