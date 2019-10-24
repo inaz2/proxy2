@@ -10,6 +10,8 @@ HTTP/HTTPS proxy in a single python script
 * support both of IPv4 and IPv6
 * support HTTP/1.1 Persistent Connection
 * support dynamic certificate generation for HTTPS intercept
+* all openssl operations does via pyopenssl api without any syscalls
+* support certificate generation with subjectAltName extension for prevent ERR_CERT_COMMON_NAME_INVALID error.
 
 This script works on Python 2.7.
 You need to install OpenSSL to intercept HTTPS connections.
@@ -41,11 +43,9 @@ $ python proxy2.py 3128
 
 ## Enable HTTPS intercept
 
-To intercept HTTPS connections, generate private keys and a private CA certificate:
-
-```
-$ ./setup_https_intercept.sh
-```
+This proxy intercepts HTTPS connections automatically. It generates private keys and a private CA certificate during 
+the first run or if it doesn't exist as ca.crt, cert.key and ca.key at ssl-data folder. You may change it names at ssl_wrapper.py
+file.
 
 Through the proxy, you can access http://proxy2.test/ and install the CA certificate in the browsers.
 
