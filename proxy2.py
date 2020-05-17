@@ -13,21 +13,19 @@ import re
 from ssl_wrapper import *
 from string import Template
 from OpenSSL import crypto
-
+import html
 try:
     import http.client as httplib
     import urllib.parse as urlparse
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from socketserver import ThreadingMixIn
-    from io import StringIO
-    from html.parser import HTMLParser
+    from io import StringIO, BytesIO
 except ImportError:
     import httplib
     import urlparse
     from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
     from SocketServer import ThreadingMixIn
-    from cStringIO import StringIO
-    from HTMLParser import HTMLParser
+    from cStringIO import StringIO, BytesIO
 
 
 def print_color(c, s):
@@ -216,6 +214,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         elif res_body_modified is not None:
             res_body_plain = res_body_modified
             res_body = self.encode_content_body(res_body_plain, content_encoding)
+            del res.headers['Content-Length']
             res.headers['Content-Length'] = str(len(res_body))
 
         setattr(res, 'headers', self.filter_headers(res.headers))
@@ -224,16 +223,18 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         for k, v in res.headers.items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(res_body.encode('latin_1'))
+        if res_body:
+            self.wfile.write(res_body.encode('latin_1'))
         self.wfile.flush()
 
         with self.lock:
             self.save_handler(req, req_body, res, res_body_plain)
 
     def relay_streaming(self, res):
-        self.wfile.write("%s %d %s\r\n" % (self.protocol_version, res.status, res.reason))
-        for line in res.headers.headers:
-            self.wfile.write(line)
+        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason)
+                         .encode('latin-1', 'strinct'))
+        for k, v in res.headers.items():
+            self.send_header(k, v)
         self.end_headers()
         try:
             while True:
@@ -270,7 +271,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if encoding == 'identity':
             data = text
         elif encoding in ('gzip', 'x-gzip'):
-            io = StringIO()
+            io = BytesIO()
             with gzip.GzipFile(fileobj=io, mode='wb') as f:
                 f.write(text)
             data = io.getvalue()
@@ -284,7 +285,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if encoding == 'identity':
             text = data
         elif encoding in ('gzip', 'x-gzip'):
-            io = StringIO(data)
+            io = BytesIO(data)
             with gzip.GzipFile(fileobj=io) as f:
                 text = f.read()
         elif encoding == 'deflate':
@@ -338,7 +339,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             content_type = req.headers.get('Content-Type', '')
 
             if content_type.startswith('application/x-www-form-urlencoded'):
-                req_body_text = parse_qsl(req_body)
+                req_body_text = parse_qsl(req_body.decode('latin-1'))
             elif content_type.startswith('application/json'):
                 try:
                     json_obj = json.loads(req_body)
@@ -382,10 +383,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     res_body_text = res_body
             elif content_type.startswith('text/html'):
-                m = re.search(r'<title[^>]*>\s*([^<]+?)\s*</title>', res_body, re.I)
+                m = re.search(r'<title[^>]*>\s*([^<]+?)\s*</title>', res_body.decode('latin-1'), re.I)
                 if m:
-                    h = HTMLParser()
-                    print_color(32, "==== HTML TITLE ====\n{}\n".format(h.unescape(m.group(1))))
+                    print_color(32, "==== HTML TITLE ====\n{}\n".format(html.unescape(m.group(1))))
             elif content_type.startswith('text/') and len(res_body) < 1024:
                 res_body_text = res_body
 
@@ -406,7 +406,7 @@ def test(HandlerClass=ProxyRequestHandler, ServerClass=ThreadingHTTPServer, prot
     if sys.argv[1:]:
         port = int(sys.argv[1])
     else:
-        port = 8080
+        port = 8082
     server_address = ('::1', port)
 
     HandlerClass.protocol_version = protocol
