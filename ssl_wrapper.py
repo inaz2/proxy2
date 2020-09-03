@@ -97,13 +97,13 @@ def create_certificate(
     if self_signed_x509v3:
         ret_x509_obj.set_version(2)
         ret_x509_obj.add_extensions([
-            crypto.X509Extension("subjectKeyIdentifier", False, "hash",
+            crypto.X509Extension(b'subjectKeyIdentifier', False, b'hash',
                                  subject=ret_x509_obj),
-            crypto.X509Extension("basicConstraints", False, "CA:TRUE"),
+            crypto.X509Extension(b'basicConstraints', False, b'CA:TRUE'),
             ])
         ret_x509_obj.add_extensions([
-            crypto.X509Extension("authorityKeyIdentifier", False,
-                                 "keyid:always", issuer=ret_x509_obj),
+            crypto.X509Extension(b'authorityKeyIdentifier', False,
+                                 b'keyid:always', issuer=ret_x509_obj),
         ])
     if len(subject_alt_names) != 0:
         ret_x509_obj.set_version(2) # 0x3
@@ -120,7 +120,7 @@ def create_certificate(
 
 def ca_files_exist():
     return all(
-        [map(isfile, [ca_key, ca_crt, cert_key]), isdir(dir_name)])
+        list(map(isfile, [ca_key, ca_crt, cert_key])) + [isdir(dir_name)])
 
 if not ca_files_exist():
     # TODO: move this code to pyopenssl library
@@ -134,11 +134,11 @@ if not ca_files_exist():
             cert_req_temp, ('__self_signed', ca_key_o), 1509982490957715,
             (0, 60 * 60 * 24 * 30), self_signed_x509v3=True
         )
-        with open(ca_key, 'w+') as f:
+        with open(ca_key, 'wb+') as f:
             f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, ca_key_o))
-        with open(cert_key, 'w+') as f:
+        with open(cert_key, 'wb+') as f:
             f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, cert_key_o))
-        with open(ca_crt, 'w+') as f:
+        with open(ca_crt, 'wb+') as f:
             f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, ca_crt_o))
 
         if not isdir(cert_dir):
