@@ -42,8 +42,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     def handle_error(self, request, client_address):
         # surpress socket/ssl related errors
         cls, e = sys.exc_info()[:2]
-        print("error is here: ", cls, e)
-        if cls is socket.error or cls is ssl.SSLError:
+        if cls is socket.error or cls is BrokenPipeError or cls is ssl.SSLError:
+            # BrokenPipeError is socket.error in Python2 and standalone error in Python3.
+            # This is most frequently raised error  here.
+            # I don't understand why it raises here
+            # looks like it is caused by some errors in the proxy logic: for some
+            # reasons  a client closes connection
+            # I thinks the keep-alive logic should be checked.
             pass
         else:
             return HTTPServer.handle_error(self, request, client_address)
@@ -228,48 +233,18 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if 'Content-Length' not in res.headers:
             res.headers['Content-Length'] = str(len(res_body))
 
-#
-        headers_before_filtering = ""
-        for k, v in res.headers.items():
-            headers_before_filtering = headers_before_filtering + k + ": " + v + "\n"
-#
         setattr(res, 'headers', self.filter_headers(res.headers))
 
-        try:
-            self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin-1'))
-            #print("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin-1'))
+        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin-1'))
+        for k, v in res.headers.items():
+            self.send_header(k, v)
+        self.end_headers()
+        if res_body:
+            self.wfile.write(res_body.encode('latin-1'))
+        self.wfile.flush()
 
-            for k, v in res.headers.items():
-                self.send_header(k, v)
-
-            #print(b"".join(self._headers_buffer))
-            self.end_headers()
-            if res_body:
-                self.wfile.write(res_body.encode('latin-1'))
-            self.wfile.flush()
-
-        except Exception as e:
-            print("------------\n",
-                  self.command, self.path, self.protocol_version, res.status, res.reason, "\n",
-                  res.headers, "\n",
-                  '=========', "\n",
-                  headers_before_filtering)
-            #print(b"".join(self._headers_buffer))
-            #print("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin-1'))
-            #print("------------")
-            if res_body:
-                if res.headers['Content-Encoding'] in ('gzip', 'x-gzip'):
-                    io = BytesIO(res_body.encode('latin-1'))
-                    with gzip.GzipFile(fileobj=io) as f:
-                        data = f.read()
-                        print(data)
-            raise e
-            self.close_connection = 1
-            return
-
-
-        #with self.lock:
-        #    self.save_handler(req, req_body, res, res_body_plain)
+        with self.lock:
+            self.save_handler(req, req_body, res, res_body_plain)
 
     def relay_streaming(self, res):
         self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason)
