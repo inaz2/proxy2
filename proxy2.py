@@ -174,7 +174,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             req_body = req_body_modified
             if 'Content-Length' in req.headers:
                 del req.headers['Content-Length']
-            req.headers['Content-length'] = str(len(req_body))
+            req.headers['Content-Length'] = str(len(req_body))
 
         u = urlparse.urlsplit(req.path)
         scheme, netloc, path = u.scheme, u.netloc, (u.path + '?' + u.query if u.query else u.path)
