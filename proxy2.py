@@ -59,13 +59,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     cacert = join_with_script_dir('ca.crt')
     certkey = join_with_script_dir('cert.key')
     certdir = join_with_script_dir('certs/')
-    timeout = 5
+    timeout = 10
+    chain_proxy = ""
     lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
         self.tls = threading.local()
         self.tls.conns = {}
-
         BaseHTTPRequestHandler.__init__(self, *args, **kwargs)
 
     def log_error(self, format, *args):
@@ -106,7 +106,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 with open(certpath, 'wb+') as f:
                     f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
 
-
         self.wfile.write("{} {} {}\r\n".format(self.protocol_version, 200, 'Connection Established').encode('latin-1'))
         self.wfile.write(b'\r\n')
 
@@ -114,7 +113,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                                           keyfile=cert_key,
                                           certfile=certpath,
                                           server_side=True)
-
         self.rfile = self.connection.makefile("rb", self.rbufsize)
         self.wfile = self.connection.makefile("wb", self.wbufsize)
 
@@ -123,7 +121,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             self.close_connection = 0
         else:
             self.close_connection = 1
-            print("CONNECTION CLOSED 0")
 
     def connect_relay(self):
         address = self.path.split(':', 1)
@@ -147,7 +144,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 data = r.recv(8192)
                 if not data:
                     self.close_connection = 1
-                    print("CONNECTION CLOSED 2")
+
                     break
                 other.sendall(data)
 
@@ -188,10 +185,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         try:
             origin = (scheme, netloc)
             if origin not in self.tls.conns:
+                connection_host = self.chain_proxy if len(self.chain_proxy) else netloc
                 if scheme == 'https':
-                    self.tls.conns[origin] = httplib.HTTPSConnection(netloc, timeout=self.timeout)
+                    self.tls.conns[origin] = httplib.HTTPSConnection(connection_host, timeout=self.timeout)
                 else:
-                    self.tls.conns[origin] = httplib.HTTPConnection(netloc, timeout=self.timeout)
+                    self.tls.conns[origin] = httplib.HTTPConnection(connection_host, timeout=self.timeout)
+                if len(self.chain_proxy):
+                    self.tls.conns[origin].set_tunnel(netloc)
+
             conn = self.tls.conns[origin]
             conn.request(self.command, path, req_body, dict(req.headers))
             res = conn.getresponse()
@@ -208,7 +209,6 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 #with self.lock:
                 #    self.save_handler(req, req_body, res, '')
                 return
-
             res_body = res.read().decode('latin-1')
         except Exception as e:
             if origin in self.tls.conns:
@@ -234,6 +234,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             res.headers['Content-Length'] = str(len(res_body))
 
         setattr(res, 'headers', self.filter_headers(res.headers))
+
 
         self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin-1'))
         for k, v in res.headers.items():
@@ -433,9 +434,10 @@ def test(HandlerClass=ProxyRequestHandler, ServerClass=ThreadingHTTPServer, prot
         port = int(sys.argv[1])
     else:
         port = 8080
-    server_address = ('::1', port)
+    server_address = ("localhost", port)
 
     HandlerClass.protocol_version = protocol
+    #HandlerClass.chain_proxy = "localhost:9182"
     httpd = ServerClass(server_address, HandlerClass)
 
     sa = httpd.socket.getsockname()
