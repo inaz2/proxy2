@@ -10,22 +10,22 @@ import zlib
 import time
 import json
 import re
-from subprocess import Popen, PIPE
-
+from ssl_wrapper import *
+from string import Template
+from OpenSSL import crypto
+import html
 try:
     import http.client as httplib
     import urllib.parse as urlparse
     from http.server import HTTPServer, BaseHTTPRequestHandler
     from socketserver import ThreadingMixIn
-    from io import StringIO
-    from html.parser import HTMLParser
+    from io import StringIO, BytesIO
 except ImportError:
     import httplib
     import urlparse
     from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
     from SocketServer import ThreadingMixIn
-    from cStringIO import StringIO
-    from HTMLParser import HTMLParser
+    from cStringIO import StringIO, BytesIO
 
 
 def print_color(c, s):
@@ -42,7 +42,13 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     def handle_error(self, request, client_address):
         # surpress socket/ssl related errors
         cls, e = sys.exc_info()[:2]
-        if cls is socket.error or cls is ssl.SSLError:
+        if cls is socket.error or cls is BrokenPipeError or cls is ssl.SSLError:
+            # BrokenPipeError is socket.error in Python2 and standalone error in Python3.
+            # This is most frequently raised error  here.
+            # I don't understand why it raises here
+            # looks like it is caused by some errors in the proxy logic: for some
+            # reasons  a client closes connection
+            # I thinks the keep-alive logic should be checked.
             pass
         else:
             return HTTPServer.handle_error(self, request, client_address)
@@ -53,13 +59,13 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
     cacert = join_with_script_dir('ca.crt')
     certkey = join_with_script_dir('cert.key')
     certdir = join_with_script_dir('certs/')
-    timeout = 5
+    timeout = 10
+    chain_proxy = ""
     lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
         self.tls = threading.local()
         self.tls.conns = {}
-
         BaseHTTPRequestHandler.__init__(self, *args, **kwargs)
 
     def log_error(self, format, *args):
@@ -70,26 +76,43 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         self.log_message(format, *args)
 
     def do_CONNECT(self):
-        if os.path.isfile(self.cakey) and os.path.isfile(self.cacert) and os.path.isfile(self.certkey) and os.path.isdir(self.certdir):
+        if ca_files_exist():
             self.connect_intercept()
         else:
+            print("can't encode ssl traffic, just relay it")
             self.connect_relay()
 
     def connect_intercept(self):
         hostname = self.path.split(':')[0]
-        certpath = "{}/{}.crt".format(self.certdir.rstrip('/'), hostname)
+        ippat = re.compile("^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
+        cert_category = "DNS"
+        if ippat.match(hostname):
+            cert_category = "IP"
+
+        certpath = "%s/%s.crt" % (cert_dir.rstrip('/'), hostname)
 
         with self.lock:
             if not os.path.isfile(certpath):
-                epoch = str(int(time.time() * 1000))
-                p1 = Popen(["openssl", "req", "-new", "-key", self.certkey, "-subj", "/CN={}".format(hostname)], stdout=PIPE)
-                p2 = Popen(["openssl", "x509", "-req", "-days", "3650", "-CA", self.cacert, "-CAkey", self.cakey, "-set_serial", epoch, "-out", certpath], stdin=p1.stdout, stderr=PIPE)
-                p2.communicate()
+                x509_serial = int("%d" % (time.time() * 1000))
+                valid_time_interval = (0, 60 * 60 * 24 * 365)
+                cert_request = create_cert_request(cert_key_obj, CN=hostname)
+                cert = create_certificate(
+                    cert_request, (ca_crt_obj, ca_key_obj), x509_serial,
+                    valid_time_interval,
+                    subject_alt_names=[
+                        Template("${category}:${hostname}").substitute(hostname=hostname, category=cert_category)
+                    ]
+                )
+                with open(certpath, 'wb+') as f:
+                    f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
 
-        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, 200, 'Connection Established').encode('latin_1'))
+        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, 200, 'Connection Established').encode('latin-1'))
         self.wfile.write(b'\r\n')
 
-        self.connection = ssl.wrap_socket(self.connection, keyfile=self.certkey, certfile=certpath, server_side=True)
+        self.connection = ssl.wrap_socket(self.connection,
+                                          keyfile=cert_key,
+                                          certfile=certpath,
+                                          server_side=True)
         self.rfile = self.connection.makefile("rb", self.rbufsize)
         self.wfile = self.connection.makefile("wb", self.wbufsize)
 
@@ -121,6 +144,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 data = r.recv(8192)
                 if not data:
                     self.close_connection = 1
+
                     break
                 other.sendall(data)
 
@@ -145,22 +169,30 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             return
         elif req_body_modified is not None:
             req_body = req_body_modified
-            req.headers['Content-length'] = str(len(req_body))
+            if 'Content-Length' in req.headers:
+                del req.headers['Content-Length']
+            req.headers['Content-Length'] = str(len(req_body))
 
         u = urlparse.urlsplit(req.path)
         scheme, netloc, path = u.scheme, u.netloc, (u.path + '?' + u.query if u.query else u.path)
         assert scheme in ('http', 'https')
         if netloc:
+            if 'Host' in req.headers:
+                del req.headers['Host']
             req.headers['Host'] = netloc
         setattr(req, 'headers', self.filter_headers(req.headers))
 
         try:
             origin = (scheme, netloc)
-            if not origin in self.tls.conns:
+            if origin not in self.tls.conns:
+                connection_host = self.chain_proxy if len(self.chain_proxy) else netloc
                 if scheme == 'https':
-                    self.tls.conns[origin] = httplib.HTTPSConnection(netloc, timeout=self.timeout)
+                    self.tls.conns[origin] = httplib.HTTPSConnection(connection_host, timeout=self.timeout)
                 else:
-                    self.tls.conns[origin] = httplib.HTTPConnection(netloc, timeout=self.timeout)
+                    self.tls.conns[origin] = httplib.HTTPConnection(connection_host, timeout=self.timeout)
+                if len(self.chain_proxy):
+                    self.tls.conns[origin].set_tunnel(netloc)
+
             conn = self.tls.conns[origin]
             conn.request(self.command, path, req_body, dict(req.headers))
             res = conn.getresponse()
@@ -170,15 +202,14 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             setattr(res, 'response_version', version_table[res.version])
 
             # support streaming
-            if not 'Content-Length' in res.headers and 'no-store' in res.headers.get('Cache-Control', ''):
+            if 'Content-Length' not in res.headers and 'no-store' in res.headers.get('Cache-Control', ''):
                 self.response_handler(req, req_body, res, '')
                 setattr(res, 'headers', self.filter_headers(res.headers))
                 self.relay_streaming(res)
-                with self.lock:
-                    self.save_handler(req, req_body, res, '')
+                #with self.lock:
+                #    self.save_handler(req, req_body, res, '')
                 return
-
-            res_body = res.read().decode('latin_1')
+            res_body = res.read().decode('latin-1')
         except Exception as e:
             if origin in self.tls.conns:
                 del self.tls.conns[origin]
@@ -186,7 +217,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             return
 
         content_encoding = res.headers.get('Content-Encoding', 'identity')
-        res_body_plain = self.decode_content_body(res_body, content_encoding)
+        res_body_plain = self.decode_content_body(res_body.encode('latin-1'), content_encoding)
 
         res_body_modified = self.response_handler(req, req_body, res, res_body_plain)
         if res_body_modified is False:
@@ -195,24 +226,32 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         elif res_body_modified is not None:
             res_body_plain = res_body_modified
             res_body = self.encode_content_body(res_body_plain, content_encoding)
+            if 'Content-Length' in res.headers:
+                del res.headers['Content-Length']
+            res.headers['Content-Length'] = str(len(res_body))
+
+        if 'Content-Length' not in res.headers:
             res.headers['Content-Length'] = str(len(res_body))
 
         setattr(res, 'headers', self.filter_headers(res.headers))
 
-        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin_1'))
+
+        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason).encode('latin-1'))
         for k, v in res.headers.items():
             self.send_header(k, v)
         self.end_headers()
-        self.wfile.write(res_body.encode('latin_1'))
+        if res_body:
+            self.wfile.write(res_body.encode('latin-1'))
         self.wfile.flush()
 
         with self.lock:
             self.save_handler(req, req_body, res, res_body_plain)
 
     def relay_streaming(self, res):
-        self.wfile.write("%s %d %s\r\n" % (self.protocol_version, res.status, res.reason))
-        for line in res.headers.headers:
-            self.wfile.write(line)
+        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, res.status, res.reason)
+                         .encode('latin-1', 'strinct'))
+        for k, v in res.headers.items():
+            self.send_header(k, v)
         self.end_headers()
         try:
             while True:
@@ -233,7 +272,16 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
 
     def filter_headers(self, headers):
         # http://tools.ietf.org/html/rfc2616#section-13.5.1
-        hop_by_hop = ('connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailers', 'transfer-encoding', 'upgrade')
+        hop_by_hop = (
+            'connection',
+            'keep-alive',
+            'proxy-authenticate',
+            'proxy-authorization',
+            'te',
+            'trailers',
+            'transfer-encoding',
+            'upgrade'
+        )
         for k in hop_by_hop:
             del headers[k]
 
@@ -241,6 +289,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if 'Accept-Encoding' in headers:
             ae = headers['Accept-Encoding']
             filtered_encodings = [x for x in re.split(r',\s*', ae) if x in ('identity', 'gzip', 'x-gzip', 'deflate')]
+            del headers['Accept-Encoding']
             headers['Accept-Encoding'] = ', '.join(filtered_encodings)
 
         return headers
@@ -249,7 +298,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if encoding == 'identity':
             data = text
         elif encoding in ('gzip', 'x-gzip'):
-            io = StringIO()
+            io = BytesIO()
             with gzip.GzipFile(fileobj=io, mode='wb') as f:
                 f.write(text)
             data = io.getvalue()
@@ -263,7 +312,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         if encoding == 'identity':
             text = data
         elif encoding in ('gzip', 'x-gzip'):
-            io = StringIO(data)
+            io = BytesIO(data)
             with gzip.GzipFile(fileobj=io) as f:
                 text = f.read()
         elif encoding == 'deflate':
@@ -271,6 +320,8 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 text = zlib.decompress(data)
             except zlib.error:
                 text = zlib.decompress(data, -zlib.MAX_WBITS)
+        elif encoding == 'br': #Brotli
+            return data
         else:
             raise Exception("Unknown Content-Encoding: {}".format(encoding))
         return text
@@ -279,7 +330,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
         with open(self.cacert, 'rb') as f:
             data = f.read()
 
-        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, 200, 'OK').encode('latin_1'))
+        self.wfile.write("{} {} {}\r\n".format(self.protocol_version, 200, 'OK').encode('latin-1'))
         self.send_header('Content-Type', 'application/x-x509-ca-cert')
         self.send_header('Content-Length', len(data))
         self.send_header('Connection', 'close')
@@ -315,7 +366,7 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
             content_type = req.headers.get('Content-Type', '')
 
             if content_type.startswith('application/x-www-form-urlencoded'):
-                req_body_text = parse_qsl(req_body)
+                req_body_text = parse_qsl(req_body.decode('latin-1'))
             elif content_type.startswith('application/json'):
                 try:
                     json_obj = json.loads(req_body)
@@ -359,10 +410,9 @@ class ProxyRequestHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     res_body_text = res_body
             elif content_type.startswith('text/html'):
-                m = re.search(r'<title[^>]*>\s*([^<]+?)\s*</title>', res_body, re.I)
+                m = re.search(r'<title[^>]*>\s*([^<]+?)\s*</title>', res_body.decode('latin-1'), re.I)
                 if m:
-                    h = HTMLParser()
-                    print_color(32, "==== HTML TITLE ====\n{}\n".format(h.unescape(m.group(1))))
+                    print_color(32, "==== HTML TITLE ====\n{}\n".format(html.unescape(m.group(1))))
             elif content_type.startswith('text/') and len(res_body) < 1024:
                 res_body_text = res_body
 
@@ -384,9 +434,10 @@ def test(HandlerClass=ProxyRequestHandler, ServerClass=ThreadingHTTPServer, prot
         port = int(sys.argv[1])
     else:
         port = 8080
-    server_address = ('::1', port)
+    server_address = ("localhost", port)
 
     HandlerClass.protocol_version = protocol
+    #HandlerClass.chain_proxy = "localhost:9182"
     httpd = ServerClass(server_address, HandlerClass)
 
     sa = httpd.socket.getsockname()
